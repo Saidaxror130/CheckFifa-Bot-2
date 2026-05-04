@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN      = os.environ["BOT_TOKEN"]
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 CHAT_ID        = int(os.environ.get("CHAT_ID", str(OWNER_ID)))
+CHECK_INTERVAL_HOURS = int(os.environ.get("CHECK_INTERVAL_HOURS", "5"))
 
 MY_PVZ = {
     "ТАШ-3", "ТАШ-5", "ТАШ-8", "ТАШ-27", "ТАШ-29", "ТАШ-50",
@@ -220,6 +221,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await deny(update)
         return
     extra = "\n/admins — управление доступом" if is_owner(user_id) else ""
+    owner_cmds = "\n/interval — настроить интервал проверки" if is_owner(user_id) else ""
     await update.message.reply_text(
         "👋 <b>ПВЗ Монитор</b>\n\n"
         "Слежу за вашими ПВЗ в Google Таблице.\n\n"
@@ -228,7 +230,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/status — статус и ожидающие заказы\n"
         "/mypvz — список отслеживаемых ПВЗ\n"
         "/clear_cache — очистить кеш"
-        + extra,
+        + extra + owner_cmds,
         parse_mode="HTML"
     )
 
@@ -343,20 +345,75 @@ async def cmd_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"❌ Не найден: <code>{target_id}</code>.", parse_mode="HTML")
 
+# ─── INTERVAL (только владелец) ────────────────────────────────────────────────
+@owner_only
+async def cmd_interval(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Изменяет интервал автоматической проверки таблицы."""
+    args = ctx.args
+
+    if not args:
+        scheduler = ctx.bot_data.get("scheduler")
+        job = scheduler.get_job("pvz_check") if scheduler else None
+        current_hours = CHECK_INTERVAL_HOURS
+        if job and hasattr(job.trigger, 'interval'):
+            current_hours = int(job.trigger.interval.total_seconds() / 3600)
+
+        await update.message.reply_text(
+            f"⏱ <b>Текущий интервал проверки:</b> {current_hours} ч.\n\n"
+            f"Использование:\n"
+            f"<code>/interval ЧАСЫ</code>\n\n"
+            f"Пример: <code>/interval 3</code> — проверять каждые 3 часа\n"
+            f"Минимум: 1 час, Максимум: 24 часа",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        new_hours = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Укажи число часов: /interval 3")
+        return
+
+    if new_hours < 1 or new_hours > 24:
+        await update.message.reply_text("❌ Интервал должен быть от 1 до 24 часов")
+        return
+
+    # Перезапускаем планировщик с новым интервалом
+    scheduler = ctx.bot_data.get("scheduler")
+    if scheduler:
+        scheduler.remove_job("pvz_check")
+        scheduler.add_job(
+            check_and_notify,
+            "interval",
+            hours=new_hours,
+            args=[ctx.bot],
+            id="pvz_check",
+            next_run_time=datetime.now()
+        )
+        logger.info(f"Интервал проверки изменен на {new_hours} ч. владельцем")
+        await update.message.reply_text(
+            f"✅ <b>Интервал обновлен</b>\n\n"
+            f"Теперь таблица проверяется каждые <b>{new_hours} ч.</b>\n"
+            f"Первая проверка начнется сейчас.",
+            parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text("❌ Планировщик не найден")
+
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
 async def post_init(app: Application):
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         check_and_notify,
         "interval",
-        hours=5,
+        hours=CHECK_INTERVAL_HOURS,
         args=[app.bot],
         id="pvz_check",
         next_run_time=datetime.now()
     )
     scheduler.start()
     app.bot_data["scheduler"] = scheduler
-    logger.info("✅ Планировщик запущен (каждые 5 часов)")
+    logger.info(f"✅ Планировщик запущен (каждые {CHECK_INTERVAL_HOURS} часов)")
     logger.info(f"🤖 Бот инициализирован. Отслеживается {len(MY_PVZ)} ПВЗ")
 
 def main():
@@ -373,6 +430,7 @@ def main():
         app.add_handler(CommandHandler("mypvz",   cmd_mypvz))
         app.add_handler(CommandHandler("admins",  cmd_admins))
         app.add_handler(CommandHandler("clear_cache", cmd_clear_cache))
+        app.add_handler(CommandHandler("interval", cmd_interval))
 
         logger.info("🚀 Бот запущен и готов к работе")
         app.run_polling(drop_pending_updates=True)

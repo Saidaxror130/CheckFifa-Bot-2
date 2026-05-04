@@ -56,7 +56,7 @@ STATUS_EMOJI = {
 def status_icon(status: str) -> str:
     return STATUS_EMOJI.get(status.lower().strip(), "❓")
 
-def format_rows(rows: list[dict], title: str) -> str:
+def format_rows(rows: list, title: str) -> str:
     if not rows:
         return ""
     lines = [f"<b>{title}</b>"]
@@ -77,16 +77,24 @@ def format_rows(rows: list[dict], title: str) -> str:
         lines.append(line)
     return "\n".join(lines)
 
+def pending_block(all_pending: list) -> str:
+    """Блок с текущими заказами которые ожидают приёмки."""
+    if not all_pending:
+        return "🟢 Все заказы приняты, ничего не ожидает."
+    lines = "\n".join(
+        f"  🚚 <b>{r.get('pvz')}</b> | Заказ: <code>{r.get('order_id')}</code>"
+        for r in all_pending
+    )
+    return f"⏳ <b>Ожидают приёмки ({len(all_pending)} шт.):</b>\n{lines}"
+
 # ─── ACCESS CONTROL ────────────────────────────────────────────────────────────
 async def deny(update: Update) -> None:
-    """Тихо логирует попытку и ничего не отвечает чужим."""
     user = update.effective_user
     cmd  = update.message.text if update.message else "?"
     logger.warning(
         f"ДОСТУП ЗАПРЕЩЁН | user_id={user.id} "
         f"username=@{user.username} name={user.full_name} | cmd={cmd}"
     )
-    # Уведомляем владельца о чужой попытке
     try:
         await update.get_bot().send_message(
             OWNER_ID,
@@ -101,7 +109,6 @@ async def deny(update: Update) -> None:
         pass
 
 def owner_only(func):
-    """Декоратор: только владелец."""
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not is_owner(update.effective_user.id):
             await deny(update)
@@ -110,7 +117,6 @@ def owner_only(func):
     return wrapper
 
 def whitelist_only(func):
-    """Декоратор: только пользователи из whitelist."""
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not is_allowed(update.effective_user.id):
             await deny(update)
@@ -121,7 +127,6 @@ def whitelist_only(func):
 # ─── CORE CHECK ────────────────────────────────────────────────────────────────
 async def check_and_notify(bot: Bot, manual: bool = False, requester_id: int = None):
     logger.info("Проверяем таблицу...")
-    # Кому отвечать при manual=True
     reply_to = requester_id if requester_id else CHAT_ID
 
     try:
@@ -129,13 +134,13 @@ async def check_and_notify(bot: Bot, manual: bool = False, requester_id: int = N
     except Exception as e:
         logger.error(f"Ошибка при чтении таблицы: {e}")
         if manual:
-            await bot.send_message(reply_to, f"❌ Ошибка при чтении таблицы:\n<code>{e}</code>", parse_mode="HTML")
+            await bot.send_message(reply_to, f"❌ Ошибка:\n<code>{e}</code>", parse_mode="HTML")
         return
 
     my_rows = [r for r in all_rows if is_my_pvz(r.get("pvz", ""))]
 
     cache = load_cache()
-    seen_keys: set = set(cache.get("seen_keys", []))
+    seen_keys = set(cache.get("seen_keys", []))
 
     def row_key(r: dict) -> str:
         return f"{r.get('order_id')}|{normalize_pvz(r.get('pvz',''))}|{r.get('status_priemki','')}|{r.get('status_vydachi','')}"
@@ -162,28 +167,37 @@ async def check_and_notify(bot: Bot, manual: bool = False, requester_id: int = N
     cache["last_check"] = datetime.now().isoformat()
     save_cache(cache)
 
+    # Все текущие "Ожидает приёмки" — независимо от новизны
+    all_pending = [
+        r for r in my_rows
+        if r.get("status_priemki", "").lower().strip() == "ожидает приемки"
+        and r.get("status_vydachi", "").lower().strip() != "выдан"
+    ]
+
     if not (new_waiting or new_accepted or new_issued):
         if manual:
             await bot.send_message(
                 reply_to,
                 f"✅ <b>Новых данных нет</b>\n"
-                f"Всего строк: {len(all_rows)}, ваших ПВЗ: {len(my_rows)}",
+                f"Всего строк: {len(all_rows)}, ваших ПВЗ: {len(my_rows)}\n\n"
+                + pending_block(all_pending),
                 parse_mode="HTML"
             )
         return
 
     parts = []
     if new_waiting:
-        parts.append(format_rows(new_waiting,  "🚚 Ожидают приёмки"))
+        parts.append(format_rows(new_waiting,  "🆕 Новые — Ожидают приёмки"))
     if new_accepted:
         parts.append(format_rows(new_accepted, "📦 Приняты на ПВЗ"))
     if new_issued:
         parts.append(format_rows(new_issued,   "✅ Выданы клиентам"))
 
+    # Итог: все ожидающие прямо сейчас
+    parts.append(pending_block(all_pending))
+
     msg = "\n\n".join(parts)
-    # Всегда шлём владельцу
     await bot.send_message(CHAT_ID, msg, parse_mode="HTML")
-    # Если запросил не владелец — ему тоже отвечаем
     if manual and reply_to != CHAT_ID:
         await bot.send_message(reply_to, msg, parse_mode="HTML")
 
@@ -191,18 +205,16 @@ async def check_and_notify(bot: Bot, manual: bool = False, requester_id: int = N
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_allowed(user_id):
-        # /start доступен всем, но показываем ограниченное сообщение
         await update.message.reply_text("🔒 У вас нет доступа к этому боту.")
         await deny(update)
         return
-
     extra = "\n/admins — управление доступом" if is_owner(user_id) else ""
     await update.message.reply_text(
         "👋 <b>ПВЗ Монитор</b>\n\n"
         "Слежу за вашими ПВЗ в Google Таблице.\n\n"
         "Команды:\n"
         "/refresh — проверить таблицу прямо сейчас\n"
-        "/status — время последней проверки\n"
+        "/status — статус и ожидающие заказы\n"
         "/mypvz — список отслеживаемых ПВЗ"
         + extra,
         parse_mode="HTML"
@@ -221,12 +233,27 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     last = cache.get("last_check", "никогда")
     seen = len(cache.get("seen_keys", []))
     wl   = load_whitelist()
+
+    # Получаем текущие ожидающие из таблицы
+    try:
+        all_rows = await asyncio.to_thread(fetch_pvz_rows, SPREADSHEET_ID)
+        my_rows  = [r for r in all_rows if is_my_pvz(r.get("pvz", ""))]
+        all_pending = [
+            r for r in my_rows
+            if r.get("status_priemki", "").lower().strip() == "ожидает приемки"
+            and r.get("status_vydachi", "").lower().strip() != "выдан"
+        ]
+        pending_info = "\n\n" + pending_block(all_pending)
+    except Exception:
+        pending_info = "\n\n⚠️ Не удалось загрузить данные из таблицы."
+
     await update.message.reply_text(
         f"📊 <b>Статус бота</b>\n\n"
         f"🕐 Последняя проверка: <code>{last}</code>\n"
         f"📋 Строк в кеше: <code>{seen}</code>\n"
         f"🏪 Отслеживаемых ПВЗ: <code>{len(MY_PVZ)}</code>\n"
-        f"👥 Пользователей с доступом: <code>{len(wl)}</code>",
+        f"👥 Пользователей с доступом: <code>{len(wl)}</code>"
+        + pending_info,
         parse_mode="HTML"
     )
 
@@ -241,16 +268,9 @@ async def cmd_mypvz(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─── ADMINS (только владелец) ──────────────────────────────────────────────────
 @owner_only
 async def cmd_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """
-    /admins               — показать список
-    /admins add 123456    — добавить пользователя
-    /admins remove 123456 — удалить пользователя
-    """
-    args = ctx.args  # список аргументов после команды
-
+    args = ctx.args
     wl = load_whitelist()
 
-    # Без аргументов — показываем список
     if not args:
         lines = []
         for uid in wl:
@@ -261,7 +281,7 @@ async def cmd_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Команды:\n"
             "<code>/admins add ID</code> — добавить\n"
             "<code>/admins remove ID</code> — удалить\n\n"
-            "💡 ID пользователя можно узнать у @userinfobot",
+            "💡 ID можно узнать у @userinfobot",
             parse_mode="HTML"
         )
         return
@@ -273,7 +293,7 @@ async def cmd_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if action not in ("add", "remove"):
-        await update.message.reply_text("❌ Неизвестная команда. Используй: add или remove")
+        await update.message.reply_text("❌ Используй: add или remove")
         return
 
     try:
@@ -284,20 +304,18 @@ async def cmd_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "add":
         if add_user(target_id):
-            await update.message.reply_text(f"✅ Пользователь <code>{target_id}</code> добавлен в белый список.", parse_mode="HTML")
-            logger.info(f"Добавлен в whitelist: {target_id}")
+            await update.message.reply_text(f"✅ Пользователь <code>{target_id}</code> добавлен.", parse_mode="HTML")
         else:
-            await update.message.reply_text(f"ℹ️ Пользователь <code>{target_id}</code> уже в списке.", parse_mode="HTML")
+            await update.message.reply_text(f"ℹ️ Уже в списке: <code>{target_id}</code>.", parse_mode="HTML")
 
     elif action == "remove":
         if target_id == OWNER_ID:
             await update.message.reply_text("❌ Нельзя удалить владельца.")
             return
         if remove_user(target_id):
-            await update.message.reply_text(f"🗑 Пользователь <code>{target_id}</code> удалён из белого списка.", parse_mode="HTML")
-            logger.info(f"Удалён из whitelist: {target_id}")
+            await update.message.reply_text(f"🗑 Удалён: <code>{target_id}</code>.", parse_mode="HTML")
         else:
-            await update.message.reply_text(f"❌ Пользователь <code>{target_id}</code> не найден в списке.", parse_mode="HTML")
+            await update.message.reply_text(f"❌ Не найден: <code>{target_id}</code>.", parse_mode="HTML")
 
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
 async def post_init(app: Application):

@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -25,6 +26,22 @@ BOT_TOKEN      = os.environ["BOT_TOKEN"]
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 CHAT_ID        = int(os.environ.get("CHAT_ID", str(OWNER_ID)))
 CHECK_INTERVAL_HOURS = int(os.environ.get("CHECK_INTERVAL_HOURS", "5"))
+TIMEZONE = ZoneInfo("Asia/Tashkent")  # UTC+5
+
+def now_local():
+    """Возвращает текущее время в часовом поясе Ташкента."""
+    return datetime.now(TIMEZONE)
+
+def format_datetime(dt_str: str) -> str:
+    """Конвертирует ISO строку в читаемый формат с местным временем."""
+    try:
+        dt = datetime.fromisoformat(dt_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        dt_local = dt.astimezone(TIMEZONE)
+        return dt_local.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return dt_str
 
 MY_PVZ = {
     "ТАШ-3", "ТАШ-5", "ТАШ-8", "ТАШ-27", "ТАШ-29", "ТАШ-50",
@@ -159,7 +176,7 @@ async def check_and_notify(bot: Bot, manual: bool = False, requester_id: int = N
     new_accepted = []
     new_issued   = []
 
-    now = datetime.now().isoformat()
+    now = now_local().isoformat()
 
     for r in my_rows:
         key = row_key(r)
@@ -245,6 +262,8 @@ async def cmd_refresh(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cache = load_cache()
     last = cache.get("last_check", "никогда")
+    if last != "никогда":
+        last = format_datetime(last)
     seen = len(cache.get("seen_keys", {}))
     wl   = load_whitelist()
 
@@ -388,7 +407,7 @@ async def cmd_interval(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             hours=new_hours,
             args=[ctx.bot],
             id="pvz_check",
-            next_run_time=datetime.now()
+            next_run_time=now_local()
         )
         logger.info(f"Интервал проверки изменен на {new_hours} ч. владельцем")
         await update.message.reply_text(
@@ -409,7 +428,7 @@ async def post_init(app: Application):
         hours=CHECK_INTERVAL_HOURS,
         args=[app.bot],
         id="pvz_check",
-        next_run_time=datetime.now()
+        next_run_time=now_local()
     )
     scheduler.start()
     app.bot_data["scheduler"] = scheduler

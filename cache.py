@@ -8,9 +8,11 @@ import json
 import os
 from typing import Dict, Any
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 CACHE_FILE = os.environ.get("CACHE_FILE", "pvz_cache.json")
 CACHE_RETENTION_DAYS = 3
+TIMEZONE = ZoneInfo("Asia/Tashkent")
 
 
 def load_cache() -> Dict[str, Any]:
@@ -32,20 +34,20 @@ def _rotate_cache(data: Dict[str, Any]) -> Dict[str, Any]:
 
     # Если seen_keys это список (старый формат), конвертируем в словарь
     if isinstance(seen_keys, list):
-        now = datetime.now().isoformat()
+        now = datetime.now(TIMEZONE).isoformat()
         seen_keys = {key: now for key in seen_keys}
 
     if not seen_keys:
         return data
 
-    cutoff_date = datetime.now() - timedelta(days=CACHE_RETENTION_DAYS)
+    cutoff_date = datetime.now(TIMEZONE) - timedelta(days=CACHE_RETENTION_DAYS)
     original_count = len(seen_keys)
 
     # Удаляем старые записи
     seen_keys = {
         key: timestamp
         for key, timestamp in seen_keys.items()
-        if datetime.fromisoformat(timestamp) > cutoff_date
+        if datetime.fromisoformat(timestamp).astimezone(TIMEZONE) > cutoff_date
     }
 
     removed_count = original_count - len(seen_keys)

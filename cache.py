@@ -1,7 +1,7 @@
 """
 Простой кеш на основе JSON-файла.
 Хранит seen_keys — множество уже обработанных строк таблицы.
-Автоматически удаляет записи старше 30 дней.
+Автоматически удаляет записи старше 3 дней.
 """
 
 import json
@@ -10,7 +10,7 @@ from typing import Dict, Any
 from datetime import datetime, timedelta
 
 CACHE_FILE = os.environ.get("CACHE_FILE", "pvz_cache.json")
-CACHE_RETENTION_DAYS = 30
+CACHE_RETENTION_DAYS = 3
 
 
 def load_cache() -> Dict[str, Any]:

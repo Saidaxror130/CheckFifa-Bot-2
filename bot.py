@@ -16,11 +16,7 @@ from whitelist import (
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("bot.log", encoding="utf-8")
-    ]
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -224,15 +220,15 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await deny(update)
         return
     extra = "\n/admins — управление доступом" if is_owner(user_id) else ""
-    owner_cmds = "\n/clear_cache — очистить кеш" if is_owner(user_id) else ""
     await update.message.reply_text(
         "👋 <b>ПВЗ Монитор</b>\n\n"
         "Слежу за вашими ПВЗ в Google Таблице.\n\n"
         "Команды:\n"
         "/refresh — проверить таблицу прямо сейчас\n"
         "/status — статус и ожидающие заказы\n"
-        "/mypvz — список отслеживаемых ПВЗ"
-        + extra + owner_cmds,
+        "/mypvz — список отслеживаемых ПВЗ\n"
+        "/clear_cache — очистить кеш"
+        + extra,
         parse_mode="HTML"
     )
 
@@ -282,8 +278,8 @@ async def cmd_mypvz(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 
-# ─── CLEAR CACHE (только владелец) ─────────────────────────────────────────────
-@owner_only
+# ─── CLEAR CACHE (все в whitelist) ────────────────────────────────────────────
+@whitelist_only
 async def cmd_clear_cache(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Полностью очищает кеш обработанных заказов."""
     count = clear_cache()
@@ -293,7 +289,7 @@ async def cmd_clear_cache(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"При следующей проверке все заказы будут считаться новыми.",
         parse_mode="HTML"
     )
-    logger.info(f"Кеш очищен владельцем. Удалено {count} записей.")
+    logger.info(f"Кеш очищен пользователем {update.effective_user.id}. Удалено {count} записей.")
 
 # ─── ADMINS (только владелец) ──────────────────────────────────────────────────
 @owner_only

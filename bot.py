@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from sheets import fetch_pvz_rows
-from cache import load_cache, save_cache
+from cache import load_cache, save_cache, clear_cache
 from whitelist import (
     is_allowed, is_owner, add_user, remove_user,
     load_whitelist, OWNER_ID
@@ -16,7 +16,11 @@ from whitelist import (
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("bot.log", encoding="utf-8")
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -29,8 +33,8 @@ MY_PVZ = {
     "ТАШ-3", "ТАШ-5", "ТАШ-8", "ТАШ-27", "ТАШ-29", "ТАШ-50",
     "ТАШ-52", "ТАШ-65", "ТАШ-79", "ТАШ-82", "ТАШ-90", "ТАШ-93",
     "ТАШ-98", "ТАШ-100", "ТАШ-107", "ТАШ-151", "ТАШ-146",
-    "FRTАШ-168", "FRTАШ-183", "FRTАШ-185", "FRTАШ-187", "FRTАШ_205",
-    "FRTАШ-225", "FRTАШ-255", "FRTАШ-296", "FRTАШ-310", "FRTАШ-313",
+    "FRТАШ-168", "FRТАШ-183", "FRТАШ-185", "FRТАШ-187", "FRТАШ_205",
+    "FRТАШ-225", "FRТАШ-255", "FRТАШ-296", "FRТАШ-310", "FRТАШ-313",
 }
 
 # ─── HELPERS ───────────────────────────────────────────────────────────────────
@@ -132,15 +136,24 @@ async def check_and_notify(bot: Bot, manual: bool = False, requester_id: int = N
     try:
         all_rows = await asyncio.to_thread(fetch_pvz_rows, SPREADSHEET_ID)
     except Exception as e:
-        logger.error(f"Ошибка при чтении таблицы: {e}")
+        logger.error(f"Ошибка при чтении таблицы: {e}", exc_info=True)
         if manual:
-            await bot.send_message(reply_to, f"❌ Ошибка:\n<code>{e}</code>", parse_mode="HTML")
+            await bot.send_message(
+                reply_to,
+                f"❌ <b>Ошибка при загрузке таблицы</b>\n\n"
+                f"<code>{str(e)}</code>\n\n"
+                f"Проверьте:\n"
+                f"• Доступ к таблице (должна быть открыта по ссылке)\n"
+                f"• Правильность SPREADSHEET_ID\n"
+                f"• Интернет соединение",
+                parse_mode="HTML"
+            )
         return
 
     my_rows = [r for r in all_rows if is_my_pvz(r.get("pvz", ""))]
 
     cache = load_cache()
-    seen_keys = set(cache.get("seen_keys", []))
+    seen_keys = cache.get("seen_keys", {})
 
     def row_key(r: dict) -> str:
         return f"{r.get('order_id')}|{normalize_pvz(r.get('pvz',''))}|{r.get('status_priemki','')}|{r.get('status_vydachi','')}"
@@ -149,11 +162,13 @@ async def check_and_notify(bot: Bot, manual: bool = False, requester_id: int = N
     new_accepted = []
     new_issued   = []
 
+    now = datetime.now().isoformat()
+
     for r in my_rows:
         key = row_key(r)
         if key in seen_keys:
             continue
-        seen_keys.add(key)
+        seen_keys[key] = now  # сохраняем с timestamp
         st = r.get("status_priemki", "").lower().strip()
         sv = r.get("status_vydachi", "").lower().strip()
         if sv == "выдан":
@@ -163,8 +178,8 @@ async def check_and_notify(bot: Bot, manual: bool = False, requester_id: int = N
         elif st == "ожидает приемки":
             new_waiting.append(r)
 
-    cache["seen_keys"] = list(seen_keys)
-    cache["last_check"] = datetime.now().isoformat()
+    cache["seen_keys"] = seen_keys
+    cache["last_check"] = now
     save_cache(cache)
 
     # Все текущие "Ожидает приёмки" — независимо от новизны
@@ -209,6 +224,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await deny(update)
         return
     extra = "\n/admins — управление доступом" if is_owner(user_id) else ""
+    owner_cmds = "\n/clear_cache — очистить кеш" if is_owner(user_id) else ""
     await update.message.reply_text(
         "👋 <b>ПВЗ Монитор</b>\n\n"
         "Слежу за вашими ПВЗ в Google Таблице.\n\n"
@@ -216,7 +232,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/refresh — проверить таблицу прямо сейчас\n"
         "/status — статус и ожидающие заказы\n"
         "/mypvz — список отслеживаемых ПВЗ"
-        + extra,
+        + extra + owner_cmds,
         parse_mode="HTML"
     )
 
@@ -231,7 +247,7 @@ async def cmd_refresh(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cache = load_cache()
     last = cache.get("last_check", "никогда")
-    seen = len(cache.get("seen_keys", []))
+    seen = len(cache.get("seen_keys", {}))
     wl   = load_whitelist()
 
     # Получаем текущие ожидающие из таблицы
@@ -244,7 +260,8 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             and r.get("status_vydachi", "").lower().strip() != "выдан"
         ]
         pending_info = "\n\n" + pending_block(all_pending)
-    except Exception:
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке данных для /status: {e}", exc_info=True)
         pending_info = "\n\n⚠️ Не удалось загрузить данные из таблицы."
 
     await update.message.reply_text(
@@ -264,6 +281,19 @@ async def cmd_mypvz(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🏪 <b>Ваши ПВЗ ({len(MY_PVZ)} шт.):</b>\n\n{pvz_list}",
         parse_mode="HTML"
     )
+
+# ─── CLEAR CACHE (только владелец) ─────────────────────────────────────────────
+@owner_only
+async def cmd_clear_cache(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Полностью очищает кеш обработанных заказов."""
+    count = clear_cache()
+    await update.message.reply_text(
+        f"🗑 <b>Кеш очищен</b>\n\n"
+        f"Удалено записей: <code>{count}</code>\n"
+        f"При следующей проверке все заказы будут считаться новыми.",
+        parse_mode="HTML"
+    )
+    logger.info(f"Кеш очищен владельцем. Удалено {count} записей.")
 
 # ─── ADMINS (только владелец) ──────────────────────────────────────────────────
 @owner_only
@@ -330,23 +360,29 @@ async def post_init(app: Application):
     )
     scheduler.start()
     app.bot_data["scheduler"] = scheduler
-    logger.info("Планировщик запущен (каждые 5 часов)")
+    logger.info("✅ Планировщик запущен (каждые 5 часов)")
+    logger.info(f"🤖 Бот инициализирован. Отслеживается {len(MY_PVZ)} ПВЗ")
 
 def main():
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
-    app.add_handler(CommandHandler("start",   cmd_start))
-    app.add_handler(CommandHandler("refresh", cmd_refresh))
-    app.add_handler(CommandHandler("status",  cmd_status))
-    app.add_handler(CommandHandler("mypvz",   cmd_mypvz))
-    app.add_handler(CommandHandler("admins",  cmd_admins))
+    try:
+        app = (
+            Application.builder()
+            .token(BOT_TOKEN)
+            .post_init(post_init)
+            .build()
+        )
+        app.add_handler(CommandHandler("start",   cmd_start))
+        app.add_handler(CommandHandler("refresh", cmd_refresh))
+        app.add_handler(CommandHandler("status",  cmd_status))
+        app.add_handler(CommandHandler("mypvz",   cmd_mypvz))
+        app.add_handler(CommandHandler("admins",  cmd_admins))
+        app.add_handler(CommandHandler("clear_cache", cmd_clear_cache))
 
-    logger.info("Бот запущен")
-    app.run_polling(drop_pending_updates=True)
+        logger.info("🚀 Бот запущен и готов к работе")
+        app.run_polling(drop_pending_updates=True)
+    except Exception as e:
+        logger.critical(f"❌ Критическая ошибка при запуске бота: {e}", exc_info=True)
+        raise
 
 if __name__ == "__main__":
     main()

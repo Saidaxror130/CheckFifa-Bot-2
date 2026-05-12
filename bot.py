@@ -21,6 +21,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ─── USER REQUEST LOGGER ───────────────────────────────────────────────────────
+def log_user_request(update: Update, command: str = None):
+    """Логирует все запросы пользователей в Railway logs."""
+    user = update.effective_user
+    message_text = update.message.text if update.message else ""
+    chat_type = update.effective_chat.type if update.effective_chat else "unknown"
+
+    log_msg = (
+        f"📨 USER REQUEST | "
+        f"user_id={user.id} | "
+        f"username=@{user.username or 'None'} | "
+        f"name='{user.full_name}' | "
+        f"chat_type={chat_type} | "
+        f"command={command or message_text}"
+    )
+    logger.info(log_msg)
+
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 BOT_TOKEN      = os.environ["BOT_TOKEN"]
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
@@ -128,6 +145,7 @@ async def deny(update: Update) -> None:
 
 def owner_only(func):
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        log_user_request(update, func.__name__)
         if not is_owner(update.effective_user.id):
             await deny(update)
             return
@@ -136,6 +154,7 @@ def owner_only(func):
 
 def whitelist_only(func):
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        log_user_request(update, func.__name__)
         if not is_allowed(update.effective_user.id):
             await deny(update)
             return
@@ -232,6 +251,7 @@ async def check_and_notify(bot: Bot, manual: bool = False, requester_id: int = N
 
 # ─── COMMANDS ──────────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    log_user_request(update, "/start")
     user_id = update.effective_user.id
     if not is_allowed(user_id):
         await update.message.reply_text("🔒 У вас нет доступа к этому боту.")
